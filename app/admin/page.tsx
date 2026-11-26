@@ -7,6 +7,7 @@ import { createClient } from '@/utils/supabase/client';
 type AdminTab =
   | 'overview'
   | 'posts'
+  | 'feed_manager'
   | 'members'
   | 'live'
   | 'gifts'
@@ -14,6 +15,14 @@ type AdminTab =
 
 interface DraftAlbumPhoto {
   id: string;
+  media_url: string;
+  sort_order: number;
+  included_in_full_album: boolean;
+}
+
+interface AlbumItemRecord {
+  id: string;
+  post_id: string;
   media_url: string;
   sort_order: number;
   included_in_full_album: boolean;
@@ -30,17 +39,21 @@ interface PostRecord {
   is_vip: boolean;
   is_secret: boolean;
   is_published: boolean;
+  force_blur?: boolean;
   created_at?: string;
 }
 
 const MENU_ITEMS: { id: AdminTab; label: string; icon: string; desc: string }[] = [
   { id: 'overview', label: 'Estatísticas & Online', icon: '📊', desc: 'Membros online, entradas e métricas' },
-  { id: 'posts', label: 'Posts & Álbuns', icon: '🖼️', desc: 'Upload do PC, ordem das fotos e preços' },
+  { id: 'posts', label: 'Criar Post / Álbum', icon: '➕', desc: 'Upload do PC/celular, sequência e valores' },
+  { id: 'feed_manager', label: 'Álbuns & Fotos no Feed', icon: '🗂️', desc: 'Editar posts, blur, álbum completo, preço e excluir' },
   { id: 'members', label: 'Membros & Bloqueio', icon: '👥', desc: 'Controle de acesso, VIP, tokens e bloqueios' },
   { id: 'live', label: 'Transmissão (Live)', icon: '📡', desc: 'Compartilhar live, chat com tokens e presentes' },
   { id: 'gifts', label: 'Presentes & Pix', icon: '🎁', desc: 'Catálogo de presentes e recarga Pix Asaas' },
   { id: 'notifications', label: 'E-mail & Pagamentos', icon: '✉️', desc: 'Avisos por e-mail em compras, mimos e tokens' }
 ];
+
+const MAX_FILE_SIZE_MB = 25;
 
 export default function AdminPage() {
   const supabase = createClient() as any;
@@ -50,7 +63,7 @@ export default function AdminPage() {
   const [authError, setAuthError] = useState('');
   const [activeTab, setActiveTab] = useState<AdminTab>('posts');
 
-  // Estados de criação de post / álbum
+  // Estados de criação de post / álbum (somente upload PC/celular)
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [coverUrl, setCoverUrl] = useState('');
@@ -59,6 +72,7 @@ export default function AdminPage() {
   const [tokenPrice, setTokenPrice] = useState<string>('10');
   const [isVip, setIsVip] = useState(false);
   const [isSecret, setIsSecret] = useState(false);
+  const [forceBlur, setForceBlur] = useState(false);
   const [isPublished, setIsPublished] = useState(true);
 
   // Fotos do álbum na sequência escolhida
@@ -66,14 +80,16 @@ export default function AdminPage() {
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState('');
+  const [errorMsg, setErrorMsg] = useState('');
 
-  // Lista de posts e edição rápida de valores
+  // Gerenciador de Álbuns & Fotos no Feed
   const [posts, setPosts] = useState<PostRecord[]>([]);
   const [loadingPosts, setLoadingPosts] = useState(false);
-  const [editingPostId, setEditingPostId] = useState<string | null>(null);
-  const [editPrice, setEditPrice] = useState<string>('0');
-  const [editTokens, setEditTokens] = useState<string>('0');
-  const [editTitle, setEditTitle] = useState<string>('');
+  const [filterMode, setFilterMode] = useState<'all' | 'albums' | 'vip' | 'secret' | 'blur'>('all');
+  const [editingPost, setEditingPost] = useState<PostRecord | null>(null);
+  const [editingItems, setEditingItems] = useState<AlbumItemRecord[]>([]);
+  const [loadingItems, setLoadingItems] = useState(false);
+  const [savingEdit, setSavingEdit] = useState(false);
 
   const ADMIN_PIN = process.env.NEXT_PUBLIC_ADMIN_PIN || '1234';
 
@@ -89,13 +105,16 @@ export default function AdminPage() {
 
   const fetchPosts = async () => {
     setLoadingPosts(true);
+    setErrorMsg('');
     try {
       const { data, error } = await supabase
         .from('posts')
         .select('*')
         .order('created_at', { ascending: false });
 
-      if (!error && Array.isArray(data)) {
+      if (error) {
+        setErrorMsg(`Erro ao buscar posts: ${error.message}`);
+      } else if (Array.isArray(data)) {
         setPosts(data);
       }
     } finally {
@@ -104,49 +123,57 @@ export default function AdminPage() {
   };
 
   useEffect(() => {
-    if (isUnlocked && activeTab === 'posts') {
+    if (isUnlocked && (activeTab === 'feed_manager' || activeTab === 'posts')) {
       fetchPosts();
     }
   }, [isUnlocked, activeTab]);
 
-  // Upload de uma ou várias fotos do PC para o bucket 'media'
-  const handleFilesUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Upload direto do PC ou celular para o bucket 'media'
+  const uploadFilesToStorage = async (files: FileList | File[]): Promise<string[]> => {
+    const uploadedUrls: string[] = [];
+
+    for (const file of Array.from(files)) {
+      if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
+        setErrorMsg(`"${file.name}" excede o limite de ${MAX_FILE_SIZE_MB}MB.`);
+        continue;
+      }
+
+      const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const filePath = `uploads/${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${cleanName}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from('media')
+        .upload(filePath, file, { cacheControl: '3600', upsert: false });
+
+      if (uploadError) {
+        setErrorMsg(`Erro no upload (${file.name}): ${uploadError.message}`);
+        continue;
+      }
+
+      const { data: publicData } = supabase.storage.from('media').getPublicUrl(filePath);
+      if (publicData?.publicUrl) {
+        uploadedUrls.push(publicData.publicUrl);
+      }
+    }
+
+    return uploadedUrls;
+  };
+
+  const handleCreateUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
     setUploading(true);
     setFeedback('');
+    setErrorMsg('');
 
     try {
-      const uploadedUrls: string[] = [];
-
-      for (const file of Array.from(files)) {
-        const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-        const filePath = `uploads/${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${cleanName}`;
-
-        const { error: uploadError } = await supabase.storage
-          .from('media')
-          .upload(filePath, file, { cacheControl: '3600', upsert: false });
-
-        if (uploadError) {
-          setFeedback(`Erro no upload (${file.name}): ${uploadError.message}`);
-          continue;
-        }
-
-        const { data: publicData } = supabase.storage.from('media').getPublicUrl(filePath);
-        if (publicData?.publicUrl) {
-          uploadedUrls.push(publicData.publicUrl);
-        }
-      }
-
-      if (uploadedUrls.length > 0) {
-        if (!coverUrl) {
-          setCoverUrl(uploadedUrls[0]);
-        }
-
+      const urls = await uploadFilesToStorage(files);
+      if (urls.length > 0) {
+        setCoverUrl((prev) => prev || urls[0]);
         setAlbumPhotos((prev) => {
           const startOrder = prev.length;
-          const newItems: DraftAlbumPhoto[] = uploadedUrls.map((url, idx) => ({
+          const newItems: DraftAlbumPhoto[] = urls.map((url, idx) => ({
             id: `${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 6)}`,
             media_url: url,
             sort_order: startOrder + idx,
@@ -154,8 +181,7 @@ export default function AdminPage() {
           }));
           return [...prev, ...newItems];
         });
-
-        setFeedback(`${uploadedUrls.length} mídia(s) enviada(s) do PC com sucesso!`);
+        setFeedback(`${urls.length} arquivo(s) enviado(s) do dispositivo!`);
       }
     } finally {
       setUploading(false);
@@ -163,25 +189,19 @@ export default function AdminPage() {
     }
   };
 
-  // Mover foto para cima ou para baixo na sequência do álbum
-  const movePhoto = (index: number, direction: 'up' | 'down') => {
+  const moveDraftPhoto = (index: number, direction: 'up' | 'down') => {
     setAlbumPhotos((prev) => {
       const targetIndex = direction === 'up' ? index - 1 : index + 1;
       if (targetIndex < 0 || targetIndex >= prev.length) return prev;
-
       const copy = [...prev];
       const temp = copy[index];
       copy[index] = copy[targetIndex];
       copy[targetIndex] = temp;
-
-      return copy.map((item, idx) => ({
-        ...item,
-        sort_order: idx
-      }));
+      return copy.map((item, idx) => ({ ...item, sort_order: idx }));
     });
   };
 
-  const toggleIncludeInAlbum = (id: string) => {
+  const toggleDraftInclude = (id: string) => {
     setAlbumPhotos((prev) =>
       prev.map((item) =>
         item.id === id ? { ...item, included_in_full_album: !item.included_in_full_album } : item
@@ -190,20 +210,27 @@ export default function AdminPage() {
   };
 
   const removeDraftPhoto = (id: string) => {
-    setAlbumPhotos((prev) =>
-      prev
+    setAlbumPhotos((prev) => {
+      const next = prev
         .filter((item) => item.id !== id)
-        .map((item, idx) => ({ ...item, sort_order: idx }))
-    );
+        .map((item, idx) => ({ ...item, sort_order: idx }));
+      if (next.length === 0) {
+        setCoverUrl('');
+      } else if (!next.some((item) => item.media_url === coverUrl)) {
+        setCoverUrl(next[0].media_url);
+      }
+      return next;
+    });
   };
 
   const handleSavePost = async (e: React.FormEvent) => {
     e.preventDefault();
     setFeedback('');
+    setErrorMsg('');
 
     const mainMedia = coverUrl.trim() || albumPhotos[0]?.media_url || '';
     if (!mainMedia) {
-      setFeedback('Envie ao menos uma foto do PC ou informe a URL da mídia.');
+      setErrorMsg('Selecione ao menos uma foto ou vídeo do PC/celular antes de publicar.');
       return;
     }
 
@@ -224,6 +251,7 @@ export default function AdminPage() {
             token_price: parsedTokens,
             is_vip: isVip,
             is_secret: isSecret,
+            force_blur: forceBlur,
             is_published: isPublished
           }
         ])
@@ -231,7 +259,7 @@ export default function AdminPage() {
         .single();
 
       if (postError || !createdPost) {
-        setFeedback(`Erro ao salvar publicação: ${postError?.message || 'falha desconhecida'}`);
+        setErrorMsg(`Erro ao salvar publicação: ${postError?.message || 'falha ao inserir'}`);
         return;
       }
 
@@ -245,56 +273,216 @@ export default function AdminPage() {
 
         const { error: itemsError } = await supabase.from('album_items').insert(itemsPayload);
         if (itemsError) {
-          setFeedback(`Post criado, mas houve erro ao salvar sequência do álbum: ${itemsError.message}`);
+          setErrorMsg(`Post criado, mas houve erro ao salvar fotos do álbum: ${itemsError.message}`);
         }
       }
 
       setTitle('');
       setDescription('');
       setCoverUrl('');
+      setForceBlur(false);
       setAlbumPhotos([]);
-      setFeedback('Publicação e sequência do álbum salvas com sucesso!');
+      setFeedback('Publicação salva e enviada com sucesso!');
       await fetchPosts();
     } finally {
       setSaving(false);
     }
   };
 
-  const startEditingPost = (post: PostRecord) => {
-    setEditingPostId(post.id);
-    setEditTitle(post.title);
-    setEditPrice(String(post.album_price ?? 0));
-    setEditTokens(String(post.token_price ?? 0));
-  };
-
-  const handleUpdatePostValues = async (postId: string) => {
-    const parsedPrice = Math.max(0, parseFloat(editPrice.replace(',', '.')) || 0);
-    const parsedTokens = Math.max(0, parseInt(editTokens, 10) || 0);
+  // Ações rápidas na aba "Álbuns & Fotos no Feed"
+  const handleQuickToggleField = async (
+    post: PostRecord,
+    field: 'force_blur' | 'is_vip' | 'is_secret' | 'is_album' | 'is_published'
+  ) => {
+    setErrorMsg('');
+    const currentVal = Boolean(post[field]);
+    const nextVal = !currentVal;
 
     const { error } = await supabase
       .from('posts')
-      .update({
-        title: editTitle.trim() || 'Publicação',
-        album_price: parsedPrice,
-        token_price: parsedTokens
-      })
-      .eq('id', postId);
+      .update({ [field]: nextVal })
+      .eq('id', post.id);
 
-    if (!error) {
-      setEditingPostId(null);
-      setFeedback('Valores e título atualizados!');
+    if (error) {
+      setErrorMsg(`Não foi possível atualizar (${field}): ${error.message}`);
+      return;
+    }
+
+    setPosts((prev) =>
+      prev.map((item) => (item.id === post.id ? { ...item, [field]: nextVal } : item))
+    );
+    if (editingPost?.id === post.id) {
+      setEditingPost((prev) => (prev ? { ...prev, [field]: nextVal } : null));
+    }
+  };
+
+  const openPostEditor = async (post: PostRecord) => {
+    setEditingPost({
+      ...post,
+      album_price: Number(post.album_price ?? 0),
+      token_price: Number(post.token_price ?? 0),
+      force_blur: Boolean(post.force_blur)
+    });
+    setEditingItems([]);
+    setLoadingItems(true);
+    setFeedback('');
+    setErrorMsg('');
+
+    try {
+      const { data, error } = await supabase
+        .from('album_items')
+        .select('*')
+        .eq('post_id', post.id)
+        .order('sort_order', { ascending: true });
+
+      if (!error && Array.isArray(data)) {
+        if (data.length > 0) {
+          setEditingItems(data);
+        } else if (post.media_url) {
+          setEditingItems([
+            {
+              id: `single_${post.id}`,
+              post_id: post.id,
+              media_url: post.media_url,
+              sort_order: 0,
+              included_in_full_album: true
+            }
+          ]);
+        }
+      }
+    } finally {
+      setLoadingItems(false);
+    }
+  };
+
+  const handleEditUploadMore = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!editingPost || !e.target.files || e.target.files.length === 0) return;
+
+    setUploading(true);
+    setErrorMsg('');
+    try {
+      const urls = await uploadFilesToStorage(e.target.files);
+      if (urls.length > 0) {
+        const startOrder = editingItems.length;
+        const newItems: AlbumItemRecord[] = urls.map((url, idx) => ({
+          id: `temp_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 6)}`,
+          post_id: editingPost.id,
+          media_url: url,
+          sort_order: startOrder + idx,
+          included_in_full_album: true
+        }));
+        setEditingItems((prev) => [...prev, ...newItems]);
+      }
+    } finally {
+      setUploading(false);
+      e.target.value = '';
+    }
+  };
+
+  const moveEditingItem = (index: number, direction: 'up' | 'down') => {
+    setEditingItems((prev) => {
+      const targetIndex = direction === 'up' ? index - 1 : index + 1;
+      if (targetIndex < 0 || targetIndex >= prev.length) return prev;
+      const copy = [...prev];
+      const temp = copy[index];
+      copy[index] = copy[targetIndex];
+      copy[targetIndex] = temp;
+      return copy.map((item, idx) => ({ ...item, sort_order: idx }));
+    });
+  };
+
+  const toggleEditingItemFullAlbum = (itemId: string) => {
+    setEditingItems((prev) =>
+      prev.map((item) =>
+        item.id === itemId ? { ...item, included_in_full_album: !item.included_in_full_album } : item
+      )
+    );
+  };
+
+  const removeEditingItem = (itemId: string) => {
+    setEditingItems((prev) =>
+      prev.filter((item) => item.id !== itemId).map((item, idx) => ({ ...item, sort_order: idx }))
+    );
+  };
+
+  const handleSaveEditedPost = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingPost) return;
+
+    setSavingEdit(true);
+    setFeedback('');
+    setErrorMsg('');
+
+    try {
+      const nextCover = editingItems[0]?.media_url || editingPost.media_url;
+      const parsedPrice = Math.max(0, Number(editingPost.album_price) || 0);
+      const parsedTokens = Math.max(0, Number(editingPost.token_price) || 0);
+
+      const { error: updateErr } = await supabase
+        .from('posts')
+        .update({
+          title: editingPost.title.trim() || 'Publicação',
+          description: editingPost.description || '',
+          media_url: nextCover,
+          is_album: editingPost.is_album,
+          album_price: parsedPrice,
+          token_price: parsedTokens,
+          is_vip: editingPost.is_vip,
+          is_secret: editingPost.is_secret,
+          force_blur: Boolean(editingPost.force_blur),
+          is_published: editingPost.is_published
+        })
+        .eq('id', editingPost.id);
+
+      if (updateErr) {
+        setErrorMsg(`Erro ao salvar alterações: ${updateErr.message}`);
+        return;
+      }
+
+      if (editingItems.length > 0) {
+        await supabase.from('album_items').delete().eq('post_id', editingPost.id);
+        const rows = editingItems.map((item, idx) => ({
+          post_id: editingPost.id,
+          media_url: item.media_url,
+          sort_order: idx,
+          included_in_full_album: item.included_in_full_album
+        }));
+        const { error: itemsErr } = await supabase.from('album_items').insert(rows);
+        if (itemsErr) {
+          setErrorMsg(`Post atualizado, mas erro ao reordenar fotos: ${itemsErr.message}`);
+          return;
+        }
+      }
+
+      setFeedback('Alterações do post/álbum salvas com sucesso!');
+      setEditingPost(null);
       await fetchPosts();
-    } else {
-      setFeedback(`Erro ao atualizar: ${error.message}`);
+    } finally {
+      setSavingEdit(false);
     }
   };
 
   const handleDeletePost = async (postId: string) => {
+    setErrorMsg('');
     const { error } = await supabase.from('posts').delete().eq('id', postId);
     if (!error) {
       setPosts((prev) => prev.filter((p) => p.id !== postId));
+      if (editingPost?.id === postId) {
+        setEditingPost(null);
+      }
+      setFeedback('Publicação apagada do feed.');
+    } else {
+      setErrorMsg(`Erro ao apagar: ${error.message}`);
     }
   };
+
+  const filteredPosts = posts.filter((p) => {
+    if (filterMode === 'albums') return Boolean(p.is_album);
+    if (filterMode === 'vip') return Boolean(p.is_vip);
+    if (filterMode === 'secret') return Boolean(p.is_secret);
+    if (filterMode === 'blur') return Boolean(p.force_blur || p.is_vip || p.is_secret);
+    return true;
+  });
 
   if (!isUnlocked) {
     return (
@@ -359,7 +547,11 @@ export default function AdminPage() {
               return (
                 <button
                   key={item.id}
-                  onClick={() => setActiveTab(item.id)}
+                  onClick={() => {
+                    setActiveTab(item.id);
+                    setFeedback('');
+                    setErrorMsg('');
+                  }}
                   className={`flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-xs font-bold whitespace-nowrap transition text-left ${
                     active
                       ? 'bg-gradient-to-r from-pink-600/25 to-purple-600/25 text-white border border-pink-500/40'
@@ -388,322 +580,617 @@ export default function AdminPage() {
           <p className="text-xs text-neutral-400 mt-1">{currentItem.desc}</p>
         </div>
 
-        {activeTab === 'posts' ? (
-          <div className="space-y-6">
-            <form
-              onSubmit={handleSavePost}
-              className="bg-neutral-900 border border-neutral-800 rounded-3xl p-6 space-y-4"
-            >
-              <h2 className="text-base font-black">➕ Criar Post ou Álbum</h2>
+        {feedback && (
+          <div className="mb-4 text-xs font-semibold text-green-400 bg-green-500/10 border border-green-500/30 rounded-2xl p-3.5">
+            {feedback}
+          </div>
+        )}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-bold text-neutral-300 mb-1">
-                    Título do Post / Álbum
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Ex: Ensaio Completo Praia"
-                    value={title}
-                    onChange={(e) => setTitle(e.target.value)}
-                    className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
-                  />
-                </div>
+        {errorMsg && (
+          <div className="mb-4 text-xs font-semibold text-red-400 bg-red-500/10 border border-red-500/30 rounded-2xl p-3.5">
+            {errorMsg}
+          </div>
+        )}
 
-                <div>
-                  <label className="block text-xs font-bold text-neutral-300 mb-1">
-                    Foto de Capa (URL opcional se subir do PC)
-                  </label>
-                  <input
-                    type="url"
-                    placeholder="https://..."
-                    value={coverUrl}
-                    onChange={(e) => setCoverUrl(e.target.value)}
-                    className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
-                  />
-                </div>
+        {/* ABA 1: CRIAR POST / ÁLBUM (SOMENTE UPLOAD PC / CELULAR) */}
+        {activeTab === 'posts' && (
+          <form
+            onSubmit={handleSavePost}
+            className="bg-neutral-900 border border-neutral-800 rounded-3xl p-6 space-y-4"
+          >
+            <h2 className="text-base font-black">Novo Post ou Álbum</h2>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-neutral-300 mb-1">
+                  Título do Post / Álbum
+                </label>
+                <input
+                  type="text"
+                  placeholder="Ex: Ensaio Completo Praia"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
+                />
               </div>
 
               <div>
                 <label className="block text-xs font-bold text-neutral-300 mb-1">
-                  Descrição
+                  Descrição / Legenda
                 </label>
                 <input
                   type="text"
-                  placeholder="Detalhes do ensaio ou prévia..."
+                  placeholder="Detalhes do álbum ou prévia..."
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
                 />
               </div>
+            </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-bold text-green-400 mb-1">
-                    Valor do Álbum / Acesso (R$)
-                  </label>
-                  <input
-                    type="text"
-                    value={albumPrice}
-                    onChange={(e) => setAlbumPrice(e.target.value)}
-                    className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-yellow-400 mb-1">
-                    Custo em Tokens (para desbloqueio avulso/secreta)
-                  </label>
-                  <input
-                    type="number"
-                    value={tokenPrice}
-                    onChange={(e) => setTokenPrice(e.target.value)}
-                    className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
-                  />
-                </div>
-              </div>
-
-              {/* Upload do PC */}
-              <div className="bg-neutral-950 border border-dashed border-neutral-700 rounded-2xl p-4">
-                <label className="block text-xs font-bold text-pink-400 mb-2">
-                  💻 Enviar Fotos / Mídias do PC (bucket &ldquo;media&rdquo;)
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-green-400 mb-1">
+                  Valor do Álbum Completo (R$)
                 </label>
                 <input
-                  type="file"
-                  accept="image/*,video/*"
-                  multiple
-                  onChange={handleFilesUpload}
-                  disabled={uploading}
-                  className="block w-full text-xs text-neutral-300 file:mr-3 file:py-2 file:px-3.5 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-pink-600 file:text-white hover:file:bg-pink-500 cursor-pointer"
+                  type="text"
+                  value={albumPrice}
+                  onChange={(e) => setAlbumPrice(e.target.value)}
+                  className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
                 />
-                {uploading && (
-                  <p className="text-xs text-yellow-400 mt-2">Enviando arquivos para o Storage...</p>
-                )}
               </div>
 
-              {/* Sequência das Fotos do Álbum */}
-              {albumPhotos.length > 0 && (
-                <div className="bg-neutral-950 border border-neutral-800 rounded-2xl p-4 space-y-2.5">
-                  <p className="text-xs font-black text-white">
-                    ↕️ Sequência do Álbum ({albumPhotos.length} fotos) — defina ordem e álbum completo
-                  </p>
-                  {albumPhotos.map((photo, idx) => (
-                    <div
-                      key={photo.id}
-                      className="flex items-center justify-between gap-2 bg-neutral-900 border border-neutral-800 rounded-xl p-2"
-                    >
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <span className="text-[11px] font-black text-neutral-400 w-5">
-                          #{idx + 1}
-                        </span>
-                        <img
-                          src={photo.media_url}
-                          alt={`Foto ${idx + 1}`}
-                          className="w-11 h-11 rounded-lg object-cover shrink-0"
-                        />
-                        <label className="flex items-center gap-1.5 text-[11px] font-bold text-neutral-200 cursor-pointer">
+              <div>
+                <label className="block text-xs font-bold text-yellow-400 mb-1">
+                  Custo em Tokens (desbloqueio / foto secreta)
+                </label>
+                <input
+                  type="number"
+                  value={tokenPrice}
+                  onChange={(e) => setTokenPrice(e.target.value)}
+                  className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-white"
+                />
+              </div>
+            </div>
+
+            {/* Upload direto do PC ou Celular */}
+            <div className="bg-neutral-950 border border-dashed border-neutral-700 rounded-2xl p-4">
+              <label className="block text-xs font-bold text-pink-400 mb-2">
+                📱💻 Enviar Fotos / Vídeos do PC ou Celular (até {MAX_FILE_SIZE_MB}MB por arquivo)
+              </label>
+              <input
+                type="file"
+                accept="image/*,video/*"
+                multiple
+                onChange={handleCreateUpload}
+                disabled={uploading}
+                className="block w-full text-xs text-neutral-300 file:mr-3 file:py-2 file:px-3.5 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-pink-600 file:text-white hover:file:bg-pink-500 cursor-pointer"
+              />
+              {uploading && (
+                <p className="text-xs text-yellow-400 mt-2">Enviando mídia para o Storage...</p>
+              )}
+            </div>
+
+            {/* Ordenação das Fotos do Álbum */}
+            {albumPhotos.length > 0 && (
+              <div className="bg-neutral-950 border border-neutral-800 rounded-2xl p-4 space-y-2.5">
+                <p className="text-xs font-black text-white">
+                  ↕️ Sequência do Álbum ({albumPhotos.length} mídias) — defina ordem, capa e álbum completo
+                </p>
+                {albumPhotos.map((photo, idx) => (
+                  <div
+                    key={photo.id}
+                    className="flex flex-wrap items-center justify-between gap-2 bg-neutral-900 border border-neutral-800 rounded-xl p-2"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="text-[11px] font-black text-neutral-400 w-5">#{idx + 1}</span>
+                      <img
+                        src={photo.media_url}
+                        alt={`Mídia ${idx + 1}`}
+                        className="w-12 h-12 rounded-lg object-cover shrink-0"
+                      />
+                      <div className="flex flex-wrap items-center gap-3 text-[11px] font-bold">
+                        <label className="flex items-center gap-1.5 text-neutral-200 cursor-pointer">
                           <input
                             type="checkbox"
                             checked={photo.included_in_full_album}
-                            onChange={() => toggleIncludeInAlbum(photo.id)}
+                            onChange={() => toggleDraftInclude(photo.id)}
                             className="accent-pink-500"
                           />
                           Álbum completo
                         </label>
-                      </div>
-
-                      <div className="flex items-center gap-1 shrink-0">
                         <button
                           type="button"
-                          onClick={() => movePhoto(idx, 'up')}
-                          disabled={idx === 0}
-                          className="px-2 py-1 text-xs bg-neutral-800 hover:bg-neutral-700 disabled:opacity-30 rounded-lg"
+                          onClick={() => setCoverUrl(photo.media_url)}
+                          className={`px-2 py-0.5 rounded-md border text-[10px] ${
+                            coverUrl === photo.media_url
+                              ? 'bg-pink-600/25 border-pink-500 text-pink-300'
+                              : 'bg-neutral-800 border-neutral-700 text-neutral-400'
+                          }`}
                         >
-                          ↑
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => movePhoto(idx, 'down')}
-                          disabled={idx === albumPhotos.length - 1}
-                          className="px-2 py-1 text-xs bg-neutral-800 hover:bg-neutral-700 disabled:opacity-30 rounded-lg"
-                        >
-                          ↓
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => removeDraftPhoto(photo.id)}
-                          className="px-2 py-1 text-xs bg-red-500/15 text-red-400 hover:bg-red-500/25 rounded-lg"
-                        >
-                          ✕
+                          {coverUrl === photo.media_url ? '★ Capa' : 'Definir Capa'}
                         </button>
                       </div>
                     </div>
-                  ))}
-                </div>
-              )}
 
-              {/* Flags de Acesso */}
-              <div className="flex flex-wrap gap-4 pt-1 text-xs font-bold">
-                <label className="flex items-center gap-2 text-purple-400 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={isAlbum}
-                    onChange={(e) => setIsAlbum(e.target.checked)}
-                    className="accent-purple-500"
-                  />
-                  É Álbum Completo
-                </label>
-                <label className="flex items-center gap-2 text-pink-400 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={isVip}
-                    onChange={(e) => setIsVip(e.target.checked)}
-                    className="accent-pink-500"
-                  />
-                  Conteúdo VIP
-                </label>
-                <label className="flex items-center gap-2 text-yellow-400 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={isSecret}
-                    onChange={(e) => setIsSecret(e.target.checked)}
-                    className="accent-yellow-500"
-                  />
-                  Foto Secreta
-                </label>
-                <label className="flex items-center gap-2 text-green-400 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={isPublished}
-                    onChange={(e) => setIsPublished(e.target.checked)}
-                    className="accent-green-500"
-                  />
-                  Publicado
-                </label>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => moveDraftPhoto(idx, 'up')}
+                        disabled={idx === 0}
+                        className="px-2 py-1 text-xs bg-neutral-800 hover:bg-neutral-700 disabled:opacity-30 rounded-lg"
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => moveDraftPhoto(idx, 'down')}
+                        disabled={idx === albumPhotos.length - 1}
+                        className="px-2 py-1 text-xs bg-neutral-800 hover:bg-neutral-700 disabled:opacity-30 rounded-lg"
+                      >
+                        ↓
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => removeDraftPhoto(photo.id)}
+                        className="px-2 py-1 text-xs bg-red-500/15 text-red-400 hover:bg-red-500/25 rounded-lg"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
+            )}
 
-              {feedback && (
-                <p className="text-xs font-semibold text-green-400 bg-green-500/10 border border-green-500/30 rounded-xl p-3">
-                  {feedback}
-                </p>
-              )}
+            {/* Configurações de Acesso e Blur */}
+            <div className="flex flex-wrap gap-4 pt-1 text-xs font-bold">
+              <label className="flex items-center gap-2 text-purple-400 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={isAlbum}
+                  onChange={(e) => setIsAlbum(e.target.checked)}
+                  className="accent-purple-500"
+                />
+                Álbum Completo
+              </label>
+              <label className="flex items-center gap-2 text-pink-400 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={isVip}
+                  onChange={(e) => setIsVip(e.target.checked)}
+                  className="accent-pink-500"
+                />
+                Conteúdo VIP
+              </label>
+              <label className="flex items-center gap-2 text-yellow-400 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={isSecret}
+                  onChange={(e) => setIsSecret(e.target.checked)}
+                  className="accent-yellow-500"
+                />
+                Foto Secreta
+              </label>
+              <label className="flex items-center gap-2 text-cyan-400 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={forceBlur}
+                  onChange={(e) => setForceBlur(e.target.checked)}
+                  className="accent-cyan-500"
+                />
+                Aplicar Blur / Desfoque
+              </label>
+              <label className="flex items-center gap-2 text-green-400 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={isPublished}
+                  onChange={(e) => setIsPublished(e.target.checked)}
+                  className="accent-green-500"
+                />
+                Publicado no Feed
+              </label>
+            </div>
+
+            <button
+              type="submit"
+              disabled={saving || uploading}
+              className="w-full py-3 bg-gradient-to-r from-pink-600 to-purple-600 rounded-xl text-xs font-black hover:opacity-90 transition disabled:opacity-50"
+            >
+              {saving ? 'Salvando...' : 'Publicar no Feed'}
+            </button>
+          </form>
+        )}
+
+        {/* ABA 2: ÁLBUNS & FOTOS NO FEED (GERENCIAMENTO COMPLETO) */}
+        {activeTab === 'feed_manager' && (
+          <div className="space-y-6">
+            {/* Filtros */}
+            <div className="flex flex-wrap items-center justify-between gap-2 bg-neutral-900 border border-neutral-800 rounded-2xl p-3">
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  { id: 'all', label: 'Todos' },
+                  { id: 'albums', label: 'Álbuns' },
+                  { id: 'vip', label: 'VIP' },
+                  { id: 'secret', label: 'Secretas' },
+                  { id: 'blur', label: 'Com Blur' }
+                ].map((f) => (
+                  <button
+                    key={f.id}
+                    onClick={() => setFilterMode(f.id as any)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition ${
+                      filterMode === f.id
+                        ? 'bg-pink-600 text-white'
+                        : 'bg-neutral-950 text-neutral-400 hover:text-white'
+                    }`}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
 
               <button
-                type="submit"
-                disabled={saving || uploading}
-                className="w-full py-3 bg-gradient-to-r from-pink-600 to-purple-600 rounded-xl text-xs font-black hover:opacity-90 transition disabled:opacity-50"
+                onClick={fetchPosts}
+                className="text-xs text-neutral-300 hover:text-white bg-neutral-950 border border-neutral-800 px-3 py-1.5 rounded-xl font-bold"
               >
-                {saving ? 'Salvando...' : 'Salvar e Publicar'}
+                ↻ Atualizar
               </button>
-            </form>
+            </div>
 
-            {/* Lista de Posts / Álbuns com Edição Rápida de Preços */}
-            <div className="bg-neutral-900 border border-neutral-800 rounded-3xl p-6 space-y-3">
-              <div className="flex items-center justify-between mb-2">
-                <h2 className="text-base font-black">🖼️ Publicações & Álbuns Salvos</h2>
-                <button
-                  onClick={fetchPosts}
-                  className="text-xs text-neutral-400 hover:text-white underline"
-                >
-                  Atualizar
-                </button>
+            {/* Editor Completo do Post / Álbum Selecionado */}
+            {editingPost && (
+              <form
+                onSubmit={handleSaveEditedPost}
+                className="bg-neutral-900 border-2 border-pink-500/40 rounded-3xl p-6 space-y-4"
+              >
+                <div className="flex items-center justify-between">
+                  <h2 className="text-base font-black text-pink-400">
+                    ✏️ Editando: {editingPost.title}
+                  </h2>
+                  <button
+                    type="button"
+                    onClick={() => setEditingPost(null)}
+                    className="text-xs text-neutral-400 hover:text-white font-bold"
+                  >
+                    Fechar editor ✕
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-bold text-neutral-300 mb-1">Título</label>
+                    <input
+                      type="text"
+                      value={editingPost.title}
+                      onChange={(e) =>
+                        setEditingPost((prev) => (prev ? { ...prev, title: e.target.value } : null))
+                      }
+                      className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-neutral-300 mb-1">
+                      Descrição
+                    </label>
+                    <input
+                      type="text"
+                      value={editingPost.description || ''}
+                      onChange={(e) =>
+                        setEditingPost((prev) =>
+                          prev ? { ...prev, description: e.target.value } : null
+                        )
+                      }
+                      className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs text-white"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-bold text-green-400 mb-1">
+                      Valor do Álbum (R$)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={editingPost.album_price}
+                      onChange={(e) =>
+                        setEditingPost((prev) =>
+                          prev ? { ...prev, album_price: Number(e.target.value) } : null
+                        )
+                      }
+                      className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-yellow-400 mb-1">
+                      Custo em Tokens
+                    </label>
+                    <input
+                      type="number"
+                      value={editingPost.token_price}
+                      onChange={(e) =>
+                        setEditingPost((prev) =>
+                          prev ? { ...prev, token_price: Number(e.target.value) } : null
+                        )
+                      }
+                      className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs text-white"
+                    />
+                  </div>
+                </div>
+
+                {/* Chaves de Configuração */}
+                <div className="flex flex-wrap gap-4 text-xs font-bold">
+                  <label className="flex items-center gap-1.5 text-cyan-400 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(editingPost.force_blur)}
+                      onChange={(e) =>
+                        setEditingPost((prev) =>
+                          prev ? { ...prev, force_blur: e.target.checked } : null
+                        )
+                      }
+                      className="accent-cyan-500"
+                    />
+                    Deixar com Blur
+                  </label>
+                  <label className="flex items-center gap-1.5 text-purple-400 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editingPost.is_album}
+                      onChange={(e) =>
+                        setEditingPost((prev) =>
+                          prev ? { ...prev, is_album: e.target.checked } : null
+                        )
+                      }
+                      className="accent-purple-500"
+                    />
+                    Álbum Completo
+                  </label>
+                  <label className="flex items-center gap-1.5 text-pink-400 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editingPost.is_vip}
+                      onChange={(e) =>
+                        setEditingPost((prev) =>
+                          prev ? { ...prev, is_vip: e.target.checked } : null
+                        )
+                      }
+                      className="accent-pink-500"
+                    />
+                    VIP
+                  </label>
+                  <label className="flex items-center gap-1.5 text-yellow-400 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editingPost.is_secret}
+                      onChange={(e) =>
+                        setEditingPost((prev) =>
+                          prev ? { ...prev, is_secret: e.target.checked } : null
+                        )
+                      }
+                      className="accent-yellow-500"
+                    />
+                    Foto Secreta
+                  </label>
+                  <label className="flex items-center gap-1.5 text-green-400 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editingPost.is_published}
+                      onChange={(e) =>
+                        setEditingPost((prev) =>
+                          prev ? { ...prev, is_published: e.target.checked } : null
+                        )
+                      }
+                      className="accent-green-500"
+                    />
+                    Publicado
+                  </label>
+                </div>
+
+                {/* Fotos do Álbum Salvo */}
+                <div className="bg-neutral-950 border border-neutral-800 rounded-2xl p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-black text-white">
+                      Fotos do Álbum ({editingItems.length})
+                    </span>
+                    <label className="text-xs bg-pink-600 hover:bg-pink-500 text-white font-bold px-3 py-1.5 rounded-xl cursor-pointer">
+                      + Adicionar do PC/Celular
+                      <input
+                        type="file"
+                        accept="image/*,video/*"
+                        multiple
+                        onChange={handleEditUploadMore}
+                        className="hidden"
+                      />
+                    </label>
+                  </div>
+
+                  {loadingItems ? (
+                    <p className="text-xs text-neutral-400">Carregando fotos do álbum...</p>
+                  ) : (
+                    editingItems.map((item, idx) => (
+                      <div
+                        key={item.id}
+                        className="flex flex-wrap items-center justify-between gap-2 bg-neutral-900 border border-neutral-800 rounded-xl p-2"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <span className="text-[11px] font-black text-neutral-400 w-5">
+                            #{idx + 1}
+                          </span>
+                          <img
+                            src={item.media_url}
+                            alt={`Item ${idx + 1}`}
+                            className="w-11 h-11 rounded-lg object-cover"
+                          />
+                          <label className="flex items-center gap-1.5 text-[11px] font-bold text-neutral-200 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={item.included_in_full_album}
+                              onChange={() => toggleEditingItemFullAlbum(item.id)}
+                              className="accent-pink-500"
+                            />
+                            No Álbum Completo
+                          </label>
+                        </div>
+
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => moveEditingItem(idx, 'up')}
+                            disabled={idx === 0}
+                            className="px-2 py-1 text-xs bg-neutral-800 disabled:opacity-30 rounded-lg"
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => moveEditingItem(idx, 'down')}
+                            disabled={idx === editingItems.length - 1}
+                            className="px-2 py-1 text-xs bg-neutral-800 disabled:opacity-30 rounded-lg"
+                          >
+                            ↓
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => removeEditingItem(item.id)}
+                            className="px-2 py-1 text-xs bg-red-500/15 text-red-400 rounded-lg"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingPost(null)}
+                    className="px-4 py-2.5 bg-neutral-800 rounded-xl text-xs font-bold"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingEdit || uploading}
+                    className="px-5 py-2.5 bg-gradient-to-r from-pink-600 to-purple-600 rounded-xl text-xs font-black disabled:opacity-50"
+                  >
+                    {savingEdit ? 'Salvando...' : 'Salvar Alterações'}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {/* Lista de Posts e Álbuns */}
+            {loadingPosts ? (
+              <div className="bg-neutral-900 border border-neutral-800 rounded-3xl p-6 text-xs text-neutral-400">
+                Carregando publicações do feed...
               </div>
-
-              {loadingPosts ? (
-                <p className="text-xs text-neutral-400">Carregando...</p>
-              ) : posts.length === 0 ? (
-                <p className="text-xs text-neutral-400">Nenhuma publicação cadastrada ainda.</p>
-              ) : (
-                posts.map((post) => {
-                  const isEditing = editingPostId === post.id;
+            ) : filteredPosts.length === 0 ? (
+              <div className="bg-neutral-900 border border-neutral-800 rounded-3xl p-6 text-xs text-neutral-400">
+                Nenhuma publicação encontrada nesse filtro.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-4">
+                {filteredPosts.map((post) => {
+                  const hasBlur = Boolean(post.force_blur || post.is_vip || post.is_secret);
                   return (
                     <div
                       key={post.id}
-                      className="bg-neutral-950 border border-neutral-800 rounded-2xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                      className="bg-neutral-900 border border-neutral-800 rounded-3xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
                     >
-                      <div className="flex items-center gap-3 min-w-0">
+                      <div className="flex items-center gap-3.5 min-w-0">
                         <img
                           src={post.media_url}
                           alt={post.title}
-                          className="w-12 h-12 rounded-xl object-cover shrink-0"
+                          className={`w-16 h-16 rounded-2xl object-cover shrink-0 transition ${
+                            hasBlur ? 'blur-sm brightness-75' : ''
+                          }`}
                         />
-                        {isEditing ? (
-                          <div className="flex flex-wrap gap-2">
-                            <input
-                              type="text"
-                              value={editTitle}
-                              onChange={(e) => setEditTitle(e.target.value)}
-                              className="bg-neutral-900 border border-neutral-700 rounded-lg px-2.5 py-1 text-xs"
-                            />
-                            <input
-                              type="text"
-                              value={editPrice}
-                              onChange={(e) => setEditPrice(e.target.value)}
-                              placeholder="R$"
-                              className="w-20 bg-neutral-900 border border-neutral-700 rounded-lg px-2 py-1 text-xs"
-                            />
-                            <input
-                              type="number"
-                              value={editTokens}
-                              onChange={(e) => setEditTokens(e.target.value)}
-                              placeholder="Tokens"
-                              className="w-20 bg-neutral-900 border border-neutral-700 rounded-lg px-2 py-1 text-xs"
-                            />
+                        <div className="min-w-0">
+                          <p className="text-sm font-black text-white truncate">{post.title}</p>
+                          <p className="text-xs text-neutral-400 mt-0.5">
+                            R$ {Number(post.album_price || 0).toFixed(2).replace('.', ',')} •{' '}
+                            {post.token_price || 0} tokens
+                          </p>
+                          <div className="flex flex-wrap gap-1.5 mt-2">
+                            {post.is_album && (
+                              <span className="text-[10px] font-bold bg-purple-500/15 text-purple-300 px-2 py-0.5 rounded-full">
+                                ÁLBUM
+                              </span>
+                            )}
+                            {post.is_vip && (
+                              <span className="text-[10px] font-bold bg-pink-500/15 text-pink-300 px-2 py-0.5 rounded-full">
+                                VIP
+                              </span>
+                            )}
+                            {post.is_secret && (
+                              <span className="text-[10px] font-bold bg-yellow-500/15 text-yellow-300 px-2 py-0.5 rounded-full">
+                                SECRETA
+                              </span>
+                            )}
+                            {post.force_blur && (
+                              <span className="text-[10px] font-bold bg-cyan-500/15 text-cyan-300 px-2 py-0.5 rounded-full">
+                                BLUR ATIVO
+                              </span>
+                            )}
+                            <span
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                                post.is_published
+                                  ? 'bg-green-500/15 text-green-300'
+                                  : 'bg-neutral-800 text-neutral-400'
+                              }`}
+                            >
+                              {post.is_published ? 'PUBLICADO' : 'OCULTO'}
+                            </span>
                           </div>
-                        ) : (
-                          <div className="min-w-0">
-                            <p className="text-xs font-bold text-white truncate">{post.title}</p>
-                            <p className="text-[11px] text-neutral-400 mt-0.5">
-                              R$ {Number(post.album_price || 0).toFixed(2).replace('.', ',')} •{' '}
-                              {post.token_price || 0} tokens •{' '}
-                              {post.is_album ? 'Álbum' : 'Post simples'}
-                            </p>
-                          </div>
-                        )}
+                        </div>
                       </div>
 
-                      <div className="flex items-center gap-2 shrink-0">
-                        {isEditing ? (
-                          <>
-                            <button
-                              onClick={() => handleUpdatePostValues(post.id)}
-                              className="text-xs bg-green-600 hover:bg-green-500 text-white font-bold px-3 py-1.5 rounded-lg"
-                            >
-                              Salvar
-                            </button>
-                            <button
-                              onClick={() => setEditingPostId(null)}
-                              className="text-xs bg-neutral-800 text-neutral-300 font-bold px-2.5 py-1.5 rounded-lg"
-                            >
-                              Cancelar
-                            </button>
-                          </>
-                        ) : (
-                          <>
-                            <button
-                              onClick={() => startEditingPost(post)}
-                              className="text-xs bg-neutral-800 hover:bg-neutral-700 text-white font-bold px-3 py-1.5 rounded-lg"
-                            >
-                              Editar Valor
-                            </button>
-                            <button
-                              onClick={() => handleDeletePost(post.id)}
-                              className="text-xs bg-red-500/15 hover:bg-red-500/25 text-red-400 font-bold px-3 py-1.5 rounded-lg"
-                            >
-                              Excluir
-                            </button>
-                          </>
-                        )}
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleQuickToggleField(post, 'force_blur')}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition ${
+                            post.force_blur
+                              ? 'bg-cyan-600/25 border-cyan-500 text-cyan-200'
+                              : 'bg-neutral-950 border-neutral-800 text-neutral-300 hover:bg-neutral-800'
+                          }`}
+                        >
+                          {post.force_blur ? 'Blur: Ligado' : 'Deixar Blur'}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => openPostEditor(post)}
+                          className="px-3 py-1.5 rounded-xl text-xs font-bold bg-neutral-800 hover:bg-neutral-700 text-white transition"
+                        >
+                          Editar
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleDeletePost(post.id)}
+                          className="px-3 py-1.5 rounded-xl text-xs font-bold bg-red-500/15 hover:bg-red-500/25 text-red-400 transition"
+                        >
+                          Apagar
+                        </button>
                       </div>
                     </div>
                   );
-                })
-              )}
-            </div>
+                })}
+              </div>
+            )}
           </div>
-        ) : (
+        )}
+
+        {/* DEMAIS ABAS (SERÃO ATIVADAS NA SEQUÊNCIA) */}
+        {activeTab !== 'posts' && activeTab !== 'feed_manager' && (
           <div className="bg-neutral-900/80 border border-neutral-800 rounded-3xl p-6 text-xs text-neutral-300">
-            Módulo <strong className="text-white">{currentItem.label}</strong> será ativado na
+            Módulo <strong className="text-white">{currentItem.label}</strong> pronto para entrar na
             próxima etapa.
           </div>
         )}
