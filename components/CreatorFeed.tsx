@@ -17,7 +17,7 @@ interface CreatorFeedProps {
 }
 
 export default function CreatorFeed({ user }: CreatorFeedProps) {
-  const supabase = createClient();
+  const supabase = createClient() as any;
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
   const [role, setRole] = useState<'free' | 'vip'>('free');
@@ -41,66 +41,73 @@ export default function CreatorFeed({ user }: CreatorFeedProps) {
   }, [user]);
 
   const fetchUserProfile = async () => {
-    const { data } = await supabase
-      .from('profiles')
-      .select('role, tokens_balance')
-      .eq('id', user.id)
-      .single();
+    try {
+      const { data } = await supabase
+        .from('profiles')
+        .select('role, tokens_balance')
+        .eq('id', user.id)
+        .single();
 
-    if (data) {
-      if (data.role === 'vip') setRole('vip');
-      if (typeof data.tokens_balance === 'number') {
-        setTokensBalance(data.tokens_balance);
+      if (data) {
+        if (data.role === 'vip') setRole('vip');
+        if (typeof data.tokens_balance === 'number') {
+          setTokensBalance(data.tokens_balance);
+        }
       }
+    } catch {
+      // Mantém valores padrão caso a tabela profiles ainda não exista
     }
   };
 
   const fetchPosts = async () => {
     setLoading(true);
-    const { data, error } = await supabase
-      .from('posts')
-      .select('*')
-      .order('created_at', { ascending: false });
+    try {
+      const { data, error } = await supabase
+        .from('posts')
+        .select('*')
+        .order('created_at', { ascending: false });
 
-    if (error || !data || data.length === 0) {
-      setPosts([
-        {
-          id: 'demo-1',
-          title: 'Ensaio Exclusivo Urbano',
-          media_url:
-            'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=800&q=80',
-          is_vip: false,
-          is_secret: false
-        },
-        {
-          id: 'demo-2',
-          title: 'Bastidores de Hoje',
-          media_url:
-            'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=800&q=80',
-          is_vip: false,
-          is_secret: false
-        },
-        {
-          id: 'demo-3',
-          title: 'Foto Secreta (Desbloqueie com 10 Tokens)',
-          media_url:
-            'https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e?auto=format&fit=crop&w=800&q=80',
-          is_vip: false,
-          is_secret: true
-        },
-        {
-          id: 'demo-4',
-          title: 'Conteúdo VIP Exclusivo',
-          media_url:
-            'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=800&q=80',
-          is_vip: true,
-          is_secret: false
-        }
-      ]);
-    } else {
-      setPosts(data as Post[]);
+      if (error || !data || data.length === 0) {
+        setPosts([
+          {
+            id: 'demo-1',
+            title: 'Ensaio Exclusivo Urbano',
+            media_url:
+              'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=800&q=80',
+            is_vip: false,
+            is_secret: false
+          },
+          {
+            id: 'demo-2',
+            title: 'Bastidores de Hoje',
+            media_url:
+              'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=800&q=80',
+            is_vip: false,
+            is_secret: false
+          },
+          {
+            id: 'demo-3',
+            title: 'Foto Secreta (Desbloqueie com 10 Tokens)',
+            media_url:
+              'https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e?auto=format&fit=crop&w=800&q=80',
+            is_vip: false,
+            is_secret: true
+          },
+          {
+            id: 'demo-4',
+            title: 'Conteúdo VIP Exclusivo',
+            media_url:
+              'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=800&q=80',
+            is_vip: true,
+            is_secret: false
+          }
+        ]);
+      } else {
+        setPosts(data as Post[]);
+      }
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const handleCreateAsaasPayment = async (
@@ -164,7 +171,6 @@ export default function CreatorFeed({ user }: CreatorFeedProps) {
 
   return (
     <div className="min-h-screen bg-[#050505] text-white pb-20">
-      {/* Barra Superior de Navegação (Membros, Admin, Tokens e VIP) */}
       <div className="sticky top-0 z-40 bg-neutral-950/90 backdrop-blur-md border-b border-neutral-800 px-4 py-3">
         <div className="max-w-2xl mx-auto flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
@@ -215,7 +221,6 @@ export default function CreatorFeed({ user }: CreatorFeedProps) {
         </div>
       </div>
 
-      {/* Carrossel de Stories */}
       <section className="max-w-xl mx-auto px-4 py-5 overflow-x-auto flex gap-4 border-b border-neutral-900">
         {['Destaques', 'Ensaios', 'Bastidores', 'Ao Vivo', 'Pedidos'].map((item, idx) => (
           <div key={idx} className="flex flex-col items-center flex-shrink-0 cursor-pointer group">
@@ -233,7 +238,6 @@ export default function CreatorFeed({ user }: CreatorFeedProps) {
         ))}
       </section>
 
-      {/* Feed Principal */}
       <main className="max-w-md mx-auto px-4 mt-6 flex flex-col gap-6">
         {loading ? (
           <div className="text-center py-16 text-neutral-500 text-sm">
@@ -250,7 +254,6 @@ export default function CreatorFeed({ user }: CreatorFeedProps) {
                 key={post.id}
                 className="bg-neutral-900/90 border border-neutral-800 rounded-3xl overflow-hidden shadow-2xl"
               >
-                {/* Cabeçalho do Post */}
                 <div className="p-4 flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <div className="w-9 h-9 rounded-full bg-gradient-to-r from-pink-500 to-purple-500 p-0.5">
@@ -277,7 +280,6 @@ export default function CreatorFeed({ user }: CreatorFeedProps) {
                   )}
                 </div>
 
-                {/* Mídia com Bloqueio Inteligente */}
                 <div className="relative aspect-[4/5] bg-neutral-950 overflow-hidden">
                   <img
                     src={post.media_url}
@@ -326,7 +328,6 @@ export default function CreatorFeed({ user }: CreatorFeedProps) {
                   )}
                 </div>
 
-                {/* Ações do Post */}
                 <div className="p-3.5 border-t border-neutral-800 flex items-center justify-between text-xs">
                   <div className="flex items-center gap-4">
                     <button className="flex items-center gap-1 text-neutral-300 hover:text-pink-500 transition font-medium">
@@ -349,7 +350,6 @@ export default function CreatorFeed({ user }: CreatorFeedProps) {
         )}
       </main>
 
-      {/* Modal de Pacotes de Tokens */}
       {isTokensModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-neutral-900 border border-neutral-800 rounded-3xl max-w-sm w-full p-6 shadow-2xl">
@@ -393,7 +393,6 @@ export default function CreatorFeed({ user }: CreatorFeedProps) {
         </div>
       )}
 
-      {/* Modal de Pagamento Asaas (Pix QR Code ou Link) */}
       {pixModalData && (
         <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-neutral-900 border border-neutral-800 rounded-3xl max-w-sm w-full p-6 text-center shadow-2xl">
