@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { createClient } from '@/utils/supabase/client';
+import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
 type AdminTab =
   | 'overview'
@@ -53,10 +53,16 @@ const MENU_ITEMS: { id: AdminTab; label: string; icon: string; desc: string }[] 
   { id: 'notifications', label: 'E-mail & Pagamentos', icon: '✉️', desc: 'Avisos por e-mail em compras, mimos e tokens' }
 ];
 
+const SUPABASE_URL =
+  process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://tvrrzpgcocbjmygkyjws.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY =
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+  'sb_publishable_0uoyNSnwvqF5rj4r7bo8FQ_vsv38q0V';
+
 const MAX_FILE_SIZE_MB = 25;
 
 export default function AdminPage() {
-  const supabase = createClient() as any;
+  const supabase = createSupabaseClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY) as any;
 
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [passInput, setPassInput] = useState('');
@@ -128,7 +134,7 @@ export default function AdminPage() {
     }
   }, [isUnlocked, activeTab]);
 
-  // Upload direto do PC ou celular para o bucket 'media'
+  // Upload direto do PC ou celular para o bucket 'media' com caminho limpo
   const uploadFilesToStorage = async (files: FileList | File[]): Promise<string[]> => {
     const uploadedUrls: string[] = [];
 
@@ -138,12 +144,16 @@ export default function AdminPage() {
         continue;
       }
 
-      const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-      const filePath = `uploads/${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${cleanName}`;
+      const rawExt = file.name.split('.').pop()?.toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg';
+      const filePath = `uploads/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${rawExt}`;
 
       const { error: uploadError } = await supabase.storage
         .from('media')
-        .upload(filePath, file, { cacheControl: '3600', upsert: false });
+        .upload(filePath, file, {
+          cacheControl: '3600',
+          upsert: false,
+          contentType: file.type || undefined
+        });
 
       if (uploadError) {
         setErrorMsg(`Erro no upload (${file.name}): ${uploadError.message}`);
@@ -151,8 +161,10 @@ export default function AdminPage() {
       }
 
       const { data: publicData } = supabase.storage.from('media').getPublicUrl(filePath);
-      if (publicData?.publicUrl) {
+      if (publicData?.publicUrl && publicData.publicUrl.startsWith('http')) {
         uploadedUrls.push(publicData.publicUrl);
+      } else {
+        setErrorMsg(`URL pública inválida gerada para ${file.name}.`);
       }
     }
 
@@ -289,7 +301,6 @@ export default function AdminPage() {
     }
   };
 
-  // Ações rápidas na aba "Álbuns & Fotos no Feed"
   const handleQuickToggleField = async (
     post: PostRecord,
     field: 'force_blur' | 'is_vip' | 'is_secret' | 'is_album' | 'is_published'
@@ -523,7 +534,6 @@ export default function AdminPage() {
 
   return (
     <div className="min-h-screen bg-[#050505] text-white flex flex-col md:flex-row">
-      {/* Menu Lateral */}
       <aside className="w-full md:w-64 bg-neutral-950 border-b md:border-b-0 md:border-r border-neutral-800 p-4 flex flex-col justify-between shrink-0">
         <div>
           <div className="flex items-center justify-between md:block mb-5">
@@ -571,7 +581,6 @@ export default function AdminPage() {
         </div>
       </aside>
 
-      {/* Conteúdo Principal */}
       <main className="flex-1 p-4 md:p-8 max-w-5xl">
         <div className="mb-6">
           <h1 className="text-xl font-black">
@@ -592,7 +601,6 @@ export default function AdminPage() {
           </div>
         )}
 
-        {/* ABA 1: CRIAR POST / ÁLBUM (SOMENTE UPLOAD PC / CELULAR) */}
         {activeTab === 'posts' && (
           <form
             onSubmit={handleSavePost}
@@ -654,7 +662,6 @@ export default function AdminPage() {
               </div>
             </div>
 
-            {/* Upload direto do PC ou Celular */}
             <div className="bg-neutral-950 border border-dashed border-neutral-700 rounded-2xl p-4">
               <label className="block text-xs font-bold text-pink-400 mb-2">
                 📱💻 Enviar Fotos / Vídeos do PC ou Celular (até {MAX_FILE_SIZE_MB}MB por arquivo)
@@ -672,7 +679,6 @@ export default function AdminPage() {
               )}
             </div>
 
-            {/* Ordenação das Fotos do Álbum */}
             {albumPhotos.length > 0 && (
               <div className="bg-neutral-950 border border-neutral-800 rounded-2xl p-4 space-y-2.5">
                 <p className="text-xs font-black text-white">
@@ -721,480 +727,3 @@ export default function AdminPage() {
                         disabled={idx === 0}
                         className="px-2 py-1 text-xs bg-neutral-800 hover:bg-neutral-700 disabled:opacity-30 rounded-lg"
                       >
-                        ↑
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => moveDraftPhoto(idx, 'down')}
-                        disabled={idx === albumPhotos.length - 1}
-                        className="px-2 py-1 text-xs bg-neutral-800 hover:bg-neutral-700 disabled:opacity-30 rounded-lg"
-                      >
-                        ↓
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => removeDraftPhoto(photo.id)}
-                        className="px-2 py-1 text-xs bg-red-500/15 text-red-400 hover:bg-red-500/25 rounded-lg"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Configurações de Acesso e Blur */}
-            <div className="flex flex-wrap gap-4 pt-1 text-xs font-bold">
-              <label className="flex items-center gap-2 text-purple-400 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={isAlbum}
-                  onChange={(e) => setIsAlbum(e.target.checked)}
-                  className="accent-purple-500"
-                />
-                Álbum Completo
-              </label>
-              <label className="flex items-center gap-2 text-pink-400 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={isVip}
-                  onChange={(e) => setIsVip(e.target.checked)}
-                  className="accent-pink-500"
-                />
-                Conteúdo VIP
-              </label>
-              <label className="flex items-center gap-2 text-yellow-400 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={isSecret}
-                  onChange={(e) => setIsSecret(e.target.checked)}
-                  className="accent-yellow-500"
-                />
-                Foto Secreta
-              </label>
-              <label className="flex items-center gap-2 text-cyan-400 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={forceBlur}
-                  onChange={(e) => setForceBlur(e.target.checked)}
-                  className="accent-cyan-500"
-                />
-                Aplicar Blur / Desfoque
-              </label>
-              <label className="flex items-center gap-2 text-green-400 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={isPublished}
-                  onChange={(e) => setIsPublished(e.target.checked)}
-                  className="accent-green-500"
-                />
-                Publicado no Feed
-              </label>
-            </div>
-
-            <button
-              type="submit"
-              disabled={saving || uploading}
-              className="w-full py-3 bg-gradient-to-r from-pink-600 to-purple-600 rounded-xl text-xs font-black hover:opacity-90 transition disabled:opacity-50"
-            >
-              {saving ? 'Salvando...' : 'Publicar no Feed'}
-            </button>
-          </form>
-        )}
-
-        {/* ABA 2: ÁLBUNS & FOTOS NO FEED (GERENCIAMENTO COMPLETO) */}
-        {activeTab === 'feed_manager' && (
-          <div className="space-y-6">
-            {/* Filtros */}
-            <div className="flex flex-wrap items-center justify-between gap-2 bg-neutral-900 border border-neutral-800 rounded-2xl p-3">
-              <div className="flex flex-wrap gap-1.5">
-                {[
-                  { id: 'all', label: 'Todos' },
-                  { id: 'albums', label: 'Álbuns' },
-                  { id: 'vip', label: 'VIP' },
-                  { id: 'secret', label: 'Secretas' },
-                  { id: 'blur', label: 'Com Blur' }
-                ].map((f) => (
-                  <button
-                    key={f.id}
-                    onClick={() => setFilterMode(f.id as any)}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition ${
-                      filterMode === f.id
-                        ? 'bg-pink-600 text-white'
-                        : 'bg-neutral-950 text-neutral-400 hover:text-white'
-                    }`}
-                  >
-                    {f.label}
-                  </button>
-                ))}
-              </div>
-
-              <button
-                onClick={fetchPosts}
-                className="text-xs text-neutral-300 hover:text-white bg-neutral-950 border border-neutral-800 px-3 py-1.5 rounded-xl font-bold"
-              >
-                ↻ Atualizar
-              </button>
-            </div>
-
-            {/* Editor Completo do Post / Álbum Selecionado */}
-            {editingPost && (
-              <form
-                onSubmit={handleSaveEditedPost}
-                className="bg-neutral-900 border-2 border-pink-500/40 rounded-3xl p-6 space-y-4"
-              >
-                <div className="flex items-center justify-between">
-                  <h2 className="text-base font-black text-pink-400">
-                    ✏️ Editando: {editingPost.title}
-                  </h2>
-                  <button
-                    type="button"
-                    onClick={() => setEditingPost(null)}
-                    className="text-xs text-neutral-400 hover:text-white font-bold"
-                  >
-                    Fechar editor ✕
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-bold text-neutral-300 mb-1">Título</label>
-                    <input
-                      type="text"
-                      value={editingPost.title}
-                      onChange={(e) =>
-                        setEditingPost((prev) => (prev ? { ...prev, title: e.target.value } : null))
-                      }
-                      className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs text-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-neutral-300 mb-1">
-                      Descrição
-                    </label>
-                    <input
-                      type="text"
-                      value={editingPost.description || ''}
-                      onChange={(e) =>
-                        setEditingPost((prev) =>
-                          prev ? { ...prev, description: e.target.value } : null
-                        )
-                      }
-                      className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs text-white"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-bold text-green-400 mb-1">
-                      Valor do Álbum (R$)
-                    </label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={editingPost.album_price}
-                      onChange={(e) =>
-                        setEditingPost((prev) =>
-                          prev ? { ...prev, album_price: Number(e.target.value) } : null
-                        )
-                      }
-                      className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs text-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-yellow-400 mb-1">
-                      Custo em Tokens
-                    </label>
-                    <input
-                      type="number"
-                      value={editingPost.token_price}
-                      onChange={(e) =>
-                        setEditingPost((prev) =>
-                          prev ? { ...prev, token_price: Number(e.target.value) } : null
-                        )
-                      }
-                      className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs text-white"
-                    />
-                  </div>
-                </div>
-
-                {/* Chaves de Configuração */}
-                <div className="flex flex-wrap gap-4 text-xs font-bold">
-                  <label className="flex items-center gap-1.5 text-cyan-400 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(editingPost.force_blur)}
-                      onChange={(e) =>
-                        setEditingPost((prev) =>
-                          prev ? { ...prev, force_blur: e.target.checked } : null
-                        )
-                      }
-                      className="accent-cyan-500"
-                    />
-                    Deixar com Blur
-                  </label>
-                  <label className="flex items-center gap-1.5 text-purple-400 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={editingPost.is_album}
-                      onChange={(e) =>
-                        setEditingPost((prev) =>
-                          prev ? { ...prev, is_album: e.target.checked } : null
-                        )
-                      }
-                      className="accent-purple-500"
-                    />
-                    Álbum Completo
-                  </label>
-                  <label className="flex items-center gap-1.5 text-pink-400 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={editingPost.is_vip}
-                      onChange={(e) =>
-                        setEditingPost((prev) =>
-                          prev ? { ...prev, is_vip: e.target.checked } : null
-                        )
-                      }
-                      className="accent-pink-500"
-                    />
-                    VIP
-                  </label>
-                  <label className="flex items-center gap-1.5 text-yellow-400 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={editingPost.is_secret}
-                      onChange={(e) =>
-                        setEditingPost((prev) =>
-                          prev ? { ...prev, is_secret: e.target.checked } : null
-                        )
-                      }
-                      className="accent-yellow-500"
-                    />
-                    Foto Secreta
-                  </label>
-                  <label className="flex items-center gap-1.5 text-green-400 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={editingPost.is_published}
-                      onChange={(e) =>
-                        setEditingPost((prev) =>
-                          prev ? { ...prev, is_published: e.target.checked } : null
-                        )
-                      }
-                      className="accent-green-500"
-                    />
-                    Publicado
-                  </label>
-                </div>
-
-                {/* Fotos do Álbum Salvo */}
-                <div className="bg-neutral-950 border border-neutral-800 rounded-2xl p-4 space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-xs font-black text-white">
-                      Fotos do Álbum ({editingItems.length})
-                    </span>
-                    <label className="text-xs bg-pink-600 hover:bg-pink-500 text-white font-bold px-3 py-1.5 rounded-xl cursor-pointer">
-                      + Adicionar do PC/Celular
-                      <input
-                        type="file"
-                        accept="image/*,video/*"
-                        multiple
-                        onChange={handleEditUploadMore}
-                        className="hidden"
-                      />
-                    </label>
-                  </div>
-
-                  {loadingItems ? (
-                    <p className="text-xs text-neutral-400">Carregando fotos do álbum...</p>
-                  ) : (
-                    editingItems.map((item, idx) => (
-                      <div
-                        key={item.id}
-                        className="flex flex-wrap items-center justify-between gap-2 bg-neutral-900 border border-neutral-800 rounded-xl p-2"
-                      >
-                        <div className="flex items-center gap-2.5">
-                          <span className="text-[11px] font-black text-neutral-400 w-5">
-                            #{idx + 1}
-                          </span>
-                          <img
-                            src={item.media_url}
-                            alt={`Item ${idx + 1}`}
-                            className="w-11 h-11 rounded-lg object-cover"
-                          />
-                          <label className="flex items-center gap-1.5 text-[11px] font-bold text-neutral-200 cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={item.included_in_full_album}
-                              onChange={() => toggleEditingItemFullAlbum(item.id)}
-                              className="accent-pink-500"
-                            />
-                            No Álbum Completo
-                          </label>
-                        </div>
-
-                        <div className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => moveEditingItem(idx, 'up')}
-                            disabled={idx === 0}
-                            className="px-2 py-1 text-xs bg-neutral-800 disabled:opacity-30 rounded-lg"
-                          >
-                            ↑
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => moveEditingItem(idx, 'down')}
-                            disabled={idx === editingItems.length - 1}
-                            className="px-2 py-1 text-xs bg-neutral-800 disabled:opacity-30 rounded-lg"
-                          >
-                            ↓
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => removeEditingItem(item.id)}
-                            className="px-2 py-1 text-xs bg-red-500/15 text-red-400 rounded-lg"
-                          >
-                            ✕
-                          </button>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-
-                <div className="flex justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setEditingPost(null)}
-                    className="px-4 py-2.5 bg-neutral-800 rounded-xl text-xs font-bold"
-                  >
-                    Cancelar
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={savingEdit || uploading}
-                    className="px-5 py-2.5 bg-gradient-to-r from-pink-600 to-purple-600 rounded-xl text-xs font-black disabled:opacity-50"
-                  >
-                    {savingEdit ? 'Salvando...' : 'Salvar Alterações'}
-                  </button>
-                </div>
-              </form>
-            )}
-
-            {/* Lista de Posts e Álbuns */}
-            {loadingPosts ? (
-              <div className="bg-neutral-900 border border-neutral-800 rounded-3xl p-6 text-xs text-neutral-400">
-                Carregando publicações do feed...
-              </div>
-            ) : filteredPosts.length === 0 ? (
-              <div className="bg-neutral-900 border border-neutral-800 rounded-3xl p-6 text-xs text-neutral-400">
-                Nenhuma publicação encontrada nesse filtro.
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 gap-4">
-                {filteredPosts.map((post) => {
-                  const hasBlur = Boolean(post.force_blur || post.is_vip || post.is_secret);
-                  return (
-                    <div
-                      key={post.id}
-                      className="bg-neutral-900 border border-neutral-800 rounded-3xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
-                    >
-                      <div className="flex items-center gap-3.5 min-w-0">
-                        <img
-                          src={post.media_url}
-                          alt={post.title}
-                          className={`w-16 h-16 rounded-2xl object-cover shrink-0 transition ${
-                            hasBlur ? 'blur-sm brightness-75' : ''
-                          }`}
-                        />
-                        <div className="min-w-0">
-                          <p className="text-sm font-black text-white truncate">{post.title}</p>
-                          <p className="text-xs text-neutral-400 mt-0.5">
-                            R$ {Number(post.album_price || 0).toFixed(2).replace('.', ',')} •{' '}
-                            {post.token_price || 0} tokens
-                          </p>
-                          <div className="flex flex-wrap gap-1.5 mt-2">
-                            {post.is_album && (
-                              <span className="text-[10px] font-bold bg-purple-500/15 text-purple-300 px-2 py-0.5 rounded-full">
-                                ÁLBUM
-                              </span>
-                            )}
-                            {post.is_vip && (
-                              <span className="text-[10px] font-bold bg-pink-500/15 text-pink-300 px-2 py-0.5 rounded-full">
-                                VIP
-                              </span>
-                            )}
-                            {post.is_secret && (
-                              <span className="text-[10px] font-bold bg-yellow-500/15 text-yellow-300 px-2 py-0.5 rounded-full">
-                                SECRETA
-                              </span>
-                            )}
-                            {post.force_blur && (
-                              <span className="text-[10px] font-bold bg-cyan-500/15 text-cyan-300 px-2 py-0.5 rounded-full">
-                                BLUR ATIVO
-                              </span>
-                            )}
-                            <span
-                              className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                                post.is_published
-                                  ? 'bg-green-500/15 text-green-300'
-                                  : 'bg-neutral-800 text-neutral-400'
-                              }`}
-                            >
-                              {post.is_published ? 'PUBLICADO' : 'OCULTO'}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-2 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => handleQuickToggleField(post, 'force_blur')}
-                          className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition ${
-                            post.force_blur
-                              ? 'bg-cyan-600/25 border-cyan-500 text-cyan-200'
-                              : 'bg-neutral-950 border-neutral-800 text-neutral-300 hover:bg-neutral-800'
-                          }`}
-                        >
-                          {post.force_blur ? 'Blur: Ligado' : 'Deixar Blur'}
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => openPostEditor(post)}
-                          className="px-3 py-1.5 rounded-xl text-xs font-bold bg-neutral-800 hover:bg-neutral-700 text-white transition"
-                        >
-                          Editar
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => handleDeletePost(post.id)}
-                          className="px-3 py-1.5 rounded-xl text-xs font-bold bg-red-500/15 hover:bg-red-500/25 text-red-400 transition"
-                        >
-                          Apagar
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* DEMAIS ABAS (SERÃO ATIVADAS NA SEQUÊNCIA) */}
-        {activeTab !== 'posts' && activeTab !== 'feed_manager' && (
-          <div className="bg-neutral-900/80 border border-neutral-800 rounded-3xl p-6 text-xs text-neutral-300">
-            Módulo <strong className="text-white">{currentItem.label}</strong> pronto para entrar na
-            próxima etapa.
-          </div>
-        )}
-      </main>
-    </div>
-  );
-}
